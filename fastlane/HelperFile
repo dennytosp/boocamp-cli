@@ -1,0 +1,262 @@
+require 'date'
+require 'net/http'
+require 'uri'
+require 'json'
+
+lane :increment_android_version do |params|
+    increment_version_code(gradle_file_path: "android/app/build.gradle", version_code: params[:version_code])
+    increment_version_name(
+       gradle_file_path: "android/app/build.gradle",
+       version_name: params[:version_name]
+    )
+end
+
+def get_date_format_dd_mm_yyyy
+  Date.today.strftime('%d/%m/%Y')
+end
+
+def append_release_notes()
+  # Use absolute path for release note file
+  release_note_path = File.join(File.dirname(__FILE__), "release-note.txt")
+  UI.message("Reading release notes from: #{release_note_path}")
+  
+  # Read the current release notes from the file
+  if File.exist?(release_note_path)
+    existing_release_notes = File.read(release_note_path)
+  else
+    UI.error("Release note file not found at: #{release_note_path}")
+    existing_release_notes = "Release notes not available "
+  end
+
+  # Get the current date in the required format
+  date_str = get_date_format_dd_mm_yyyy
+
+  # Append the date and new release notes to the existing content
+  new_release_notes = "#{existing_release_notes} on #{date_str}"
+  new_release_notes
+end
+
+lane :eas_ios_upload do |params|
+  ipa_path = params[:ipa_path]
+  groups_env = ENV["TESTFLIGHT_GROUPS"] || ""
+  group_list = groups_env.split(",").map(&:strip)
+  
+  pilot(
+    api_key: app_store_connect_api_key(
+      key_id: "C2395HAW7U",
+      issuer_id: "69a6de85-755a-47e3-e053-5b8c7c11a4d1",
+      key_filepath: File.expand_path(ENV["AUTH_KEY_PATH"], __FILE__)
+    ),
+    ipa: ipa_path,
+    beta_app_feedback_email: ENV["CONTACT_EMAIL"],
+    beta_app_description: File.read(ENV["BETA_APP_DESCRIPTION"]),
+    notify_external_testers: true,
+    groups: group_list,
+    changelog: File.read(ENV["RELEASE_NOTE"]),
+  )
+end
+
+lane :ios_upload do |params|
+  username = ENV['FASTLANE_USER']
+  itc_team_id = ENV['FASTLANE_ITC_TEAM_ID']
+  team_id = ENV['FASTLANE_TEAM_ID']
+  app_identifier = ENV['EXPO_PUBLIC_PACKAGE_ID']
+
+  groups_env = ENV["TESTFLIGHT_GROUPS"] || ""
+  group_list = groups_env.split(",").map(&:strip)
+  
+  provisioning_profile_name = ENV['PROVISIONING_PROFILE_NAME']
+  ipa_path = "#{output_directory}/#{output_name}.ipa"
+  
+
+  build_app(
+    workspace: "ios/BootCampCLI.xcworkspace", 
+    scheme: "BootCampCLI", 
+    export_method: "app-store",
+    xcargs: "-allowProvisioningUpdates",
+    # export_options: {
+    #   method: "app-store",
+    #   provisioningProfiles: {
+    #     app_identifier => provisioning_profile_name
+    #   },
+    # },
+  )
+
+  upload_to_testflight(
+    ipa: ipa_path,
+    beta_app_feedback_email: ENV["CONTACT_EMAIL"],
+    beta_app_description: File.read(ENV["BETA_APP_DESCRIPTION"]),
+    notify_external_testers: true,
+    groups: group_list,
+    changelog: File.read(ENV["RELEASE_NOTE"])
+  )
+end
+
+lane :eas_android_upload do |params|
+  apk_path = params[:apk_path]
+  puts "FIREBASE_ANDROID_APP_ID: #{ENV["FIREBASE_ANDROID_APP_ID"]}"
+  puts "FIREBASE_TOKEN: #{ENV["FIREBASE_TOKEN"]}"
+  firebase_app_distribution(
+    app: ENV["FIREBASE_ANDROID_APP_ID"],
+    firebase_cli_token: ENV["FIREBASE_TOKEN"],
+    groups: ENV["FIREBASE_GROUPS"],
+    apk_path: apk_path,
+    release_notes: File.read(ENV["RELEASE_NOTE"]),
+  )
+end
+
+lane :build_android do |params|
+  ANDROID_BUILD_PATH_APK = "./android/app/build/outputs/apk/release/app-release.apk"
+
+  gradle(
+    task: params[:type] === 'apk' ? 'assemble' : 'bundle', 
+    build_type: 'Release',
+    project_dir: 'android/',
+  )
+
+  if params[:type] === 'apk'
+    upload_to_firebase(file: "#{ANDROID_BUILD_PATH_APK}")
+    system "open ../android/app/build/outputs/apk/release"
+  else
+    system "open ../android/app/build/outputs/bundle/release"
+  end
+end
+
+lane :upload_to_firebase do |params|
+  desc "Deploy to Firebase App Distribution"
+  firebase_app_distribution(
+    app: ENV["FIREBASE_ANDROID_APP_ID"],
+    firebase_cli_token: ENV["FIREBASE_TOKEN"],
+    release_notes: File.read(ENV["RELEASE_NOTE"]),
+    groups: ENV["FIREBASE_GROUPS"],
+    apk_path: params[:file]
+    # ipa_path: "#{IOS_PATH_UPLOAD}"
+  )
+  
+  notify_testers(
+    isAndroid: true,
+    text: "*#{ENV['EXPO_PUBLIC_APP_DISPLAY_NAME']}* has an Android release on *Firebase*",
+    buttonUrl: ENV["FIREBASE_ANDROID_APP_LINK"]
+  )
+end
+
+def send_request_with_retry(uri, request, max_retries = 3, delay = 5)
+  retries = 0
+  begin
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl = true
+    http.verify_mode = OpenSSL::SSL::VERIFY_PEER
+    http.open_timeout = 10
+    http.read_timeout = 10
+    response = http.request(request)
+    return response
+  rescue Net::OpenTimeout, Net::ReadTimeout, SocketError => e
+    if retries < max_retries
+      retries += 1
+      UI.message("Request failed. Retrying in #{delay} seconds... (Attempt #{retries}/#{max_retries})")
+      sleep(delay)
+      retry
+    else
+      UI.error("Failed to send request after #{max_retries} attempts: #{e.message}")
+      raise
+    end
+  end
+end
+
+def notify_all_channels(params)
+  webhook_urls = [
+    ENV["GOOGLE_CHAT_WEBHOOK"],
+    ENV["GOOGLE_CHAT_WEBHOOK_2"],
+  ]
+
+  webhook_urls.each do |webhook_url|
+    begin
+      uri = URI.parse(webhook_url)
+      text = params[:text]
+      cards =  [
+        {
+          header: {
+            title: ENV["APP_NAME"],
+            subtitle: ENV["VERSION_NUMBER"]
+          },
+          sections: [
+            {
+              widgets: [
+                {
+                  keyValue: {
+                    topLabel: "Build number",
+                    content: params[:isAndroid] ? ENV["ANDROID_BUILD_NUMBER"] : ENV["IOS_BUILD_NUMBER"],
+                    contentMultiline: true
+                  }
+                }
+              ]
+            },
+            {
+              widgets: [
+                {
+                  keyValue: {
+                    topLabel: "Environment",
+                    content: ENV["EXPO_PUBLIC_ENV"],
+                    contentMultiline: true
+                  }
+                }
+              ]
+            },
+            {
+              widgets: [
+                {
+                  keyValue: {
+                    topLabel: "Release note",
+                    content: File.read(ENV["RELEASE_NOTE"]),
+                    contentMultiline: true
+                  }
+                }
+              ]
+            },
+            {
+              widgets: [
+                {
+                  buttons: [
+                    {
+                      textButton: {
+                        text: "Install app",
+                        onClick: {
+                          openLink: {
+                            url: params[:buttonUrl]
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+
+      # Create the HTTP objects
+      request = Net::HTTP::Post.new(uri.request_uri)
+      request.content_type = "application/json"
+      request.body = {"text": text, "cards": cards}.to_json
+
+      # Send the request
+      response = send_request_with_retry(uri, request)
+
+      case response
+      when Net::HTTPSuccess
+        UI.message("Message sent to #{webhook_url}!")
+      when Net::HTTPServerError
+        UI.error("Server error when sending to #{webhook_url}: #{response.message}")
+      else
+        UI.error("Error sending to #{webhook_url}: #{response.message}")
+      end
+    rescue => e
+      UI.error("Failed to send notification to #{webhook_url}: #{e.message}")
+    end
+  end
+end
+
+lane :notify_testers do |params|
+  notify_all_channels(params)
+end

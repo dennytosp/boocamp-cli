@@ -1,0 +1,98 @@
+fastlane_require 'dotenv' 
+
+default_platform(:ios)
+
+before_all do
+  import('HelperFile')
+  # ensure_git_branch(
+  #   branch: ENV['GIT_BRANCH']
+  # )
+  ENV['APP_NAME'] = 'Highlands'
+  ENV['RELEASE_NOTE'] = 'release-note.txt'
+  ENV['BETA_APP_DESCRIPTION'] = 'beta-description.txt'
+  ENV['NOTIFY_TESTER'] = 'true'
+  ENV['FIREBASE_GROUPS'] = 'internal, external'
+  ENV['TESTFLIGHT_GROUPS'] = 'external'
+  ENV['ANDROID_BUILD_TYPE'] = 'apk'
+
+  # Update the credentials by ENV
+  sh("PROFILE=#{ENV['PROFILE']} node ../scripts/js/credentials.js")
+end
+
+platform :ios do
+  desc "Upload iOS app to TestFlight after EAS build"
+  lane :ios_distribute do
+    # Build the app with expo eas
+    build_output = sh("eas build --non-interactive --profile #{ENV['PROFILE']} --platform ios --local")
+
+    # Extract the IPA path from the build output
+    ipa_path = build_output.match(/You can find the build artifacts in (.+\.ipa)/)[1]
+
+    # Check if the file exists
+    unless File.exist?(ipa_path)
+      UI.user_error!("IPA file not found at #{ipa_path}. Ensure you run `eas build --local` first.")
+    end
+
+    # Upload to TestFlight
+    eas_ios_upload(
+      ipa_path: ipa_path
+      #  ipa_path: './fastlane/build-1742288628312.ipa'
+    )
+
+    # Notify Testers
+    notify_testers(
+      isAndroid: false,
+      text: "*#{ENV['EXPO_PUBLIC_APP_DISPLAY_NAME']}* has an iOS release on *TestFlight*",
+      buttonUrl: ENV["IOS_LINK"]
+    )
+  end
+
+  lane :ios_distribute_cli do
+    desc "Upload iOS app to TestFlight using CLI"
+    ios_upload()
+    notify_testers(
+      isAndroid: false,
+      text: "*#{ENV['EXPO_PUBLIC_APP_DISPLAY_NAME']}* has an iOS release on *TestFlight*",
+      buttonUrl: "#{ENV['IOS_LINK']}"
+    )
+    desc "IPA and dSYM files saved with timestamp to fastlane/archive folder"
+    # desc "iOS clean file cache"
+    # File.delete("../*.ipa") if File.exist?("../*.ipa")
+    # File.delete("../*.app.dSYM.zip") if File.exist?("../*.app.dSYM.zip")
+  end
+end
+
+platform :android do
+  lane :android_distribute do
+    desc "Upload Android app to Firebase Distribution after EAS build"
+
+    # Build the app with expo eas
+    build_output = sh("eas build --non-interactive --profile #{ENV['PROFILE']} --platform android --local")
+
+    # Extract the APK path from the build output
+    apk_path = build_output.match(/You can find the build artifacts in (.+\.apk)/)[1]
+
+
+    # Check if the file exists
+    unless File.exist?(apk_path)
+      UI.user_error!("APK file not found at #{apk_path}. Ensure you run `eas build --local` first.")
+    end
+
+    # Upload to Firebase Distribution
+    eas_android_upload(
+      apk_path: apk_path
+    ) 
+
+    # Notify Testers
+    notify_testers(
+      isAndroid: true,
+      text: "*#{ENV['EXPO_PUBLIC_APP_DISPLAY_NAME']}* has an Android release on *Firebase*",
+      buttonUrl: ENV["FIREBASE_ANDROID_APP_LINK"]
+    )
+  end
+
+  lane :android_distribute_cli do
+    desc "Upload Android app to Firebase Distribution using CLI"
+    build_android(type: ENV['ANDROID_BUILD_TYPE'])
+  end
+end
