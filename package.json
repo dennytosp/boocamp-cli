@@ -7,7 +7,11 @@
     "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",
-    "test": "jest"
+    "test": "jest",
+    "xc": "cd ios && open *.xcworkspace && cd ..",
+    "pod": "cd ios && pod install && cd ..",
+    "apk": "cd android && ./gradlew clean && ./gradlew assembleRelease && cd .. && open android/app/build/outputs/apk/release",
+    "aab": "cd android && ./gradlew clean && ./gradlew bundleRelease && cd .. && open android/app/build/outputs/bundle/release"
   },
   "dependencies": {
     "react": "19.1.0",
